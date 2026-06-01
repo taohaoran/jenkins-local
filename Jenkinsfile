@@ -162,14 +162,18 @@ def testPython() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 def buildGo() {
-    sh 'go env -w GOPROXY=https://goproxy.cn,direct || true'
-    sh 'go mod download'
-    sh """
-        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-        go build ${params.GO_BUILD_FLAGS} -o "${env.APP_NAME}" .
-    """
+    withEnv(["PATH+GO=/usr/local/go/bin"]) {
+        sh 'go env -w GOPROXY=https://goproxy.cn,direct || true'
+        sh 'go mod download'
+        sh """
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build ${params.GO_BUILD_FLAGS} -o "${env.APP_NAME}" .
+        """
+    }
 }
 
 def testGo() {
-    sh 'go test ./... -count=1 -timeout 120s --short || true'
+    withEnv(["PATH+GO=/usr/local/go/bin"]) {
+        sh 'go test ./... -count=1 -timeout 120s --short || true'
+    }
 }
