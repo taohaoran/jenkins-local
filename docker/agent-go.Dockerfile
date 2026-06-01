@@ -11,6 +11,7 @@ RUN for v in $GO_VERSIONS; do \
     done && \
     ln -s /usr/local/go1.23.4 /usr/local/go
 
+# 系统级 PATH，所有用户生效
 ENV PATH=/usr/local/go/bin:$PATH
 
 USER jenkins
