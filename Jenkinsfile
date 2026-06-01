@@ -1,5 +1,5 @@
 pipeline {
-    agent any
+    agent { label 'built-in' }
 
     parameters {
         string(name: 'PROJECT_DIR', defaultValue: '.',
