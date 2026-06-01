@@ -164,6 +164,7 @@ def testPython() {
 def buildGo() {
     withEnv(["PATH+GO=/usr/local/go/bin"]) {
         sh 'go env -w GOPROXY=https://goproxy.cn,direct || true'
+        sh 'go mod tidy'
         sh 'go mod download'
         sh """
             CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
