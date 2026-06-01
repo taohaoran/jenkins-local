@@ -1,6 +1,13 @@
 pipeline {
     agent { label 'built-in' }
 
+    environment {
+        // Docker daemon 通过 socat 代理访问宿主
+        DOCKER_HOST = 'tcp://alpine:2375'
+        // 容器内 JENKINS_HOME 对应的宿主路径（经 /home 挂载点）
+        HOST_JENKINS_HOME = '/home/volume/local_jenkins/jenkins_home'
+    }
+
     parameters {
         string(name: 'PROJECT_DIR', defaultValue: '.',
                description: '项目子目录（如 demos/java-springboot），留空为仓库根目录')
@@ -50,15 +57,9 @@ pipeline {
                 script {
                     dir(params.PROJECT_DIR) {
                         switch (env.PROJECT_TYPE) {
-                            case 'java-springboot':
-                                buildJava()
-                                break
-                            case 'python-fastapi':
-                                buildPython()
-                                break
-                            case 'go-gin':
-                                buildGo()
-                                break
+                            case 'java-springboot': buildJava(); break
+                            case 'python-fastapi':  buildPython(); break
+                            case 'go-gin':          buildGo(); break
                         }
                     }
                 }
@@ -70,15 +71,9 @@ pipeline {
                 script {
                     dir(params.PROJECT_DIR) {
                         switch (env.PROJECT_TYPE) {
-                            case 'java-springboot':
-                                testJava()
-                                break
-                            case 'python-fastapi':
-                                testPython()
-                                break
-                            case 'go-gin':
-                                testGo()
-                                break
+                            case 'java-springboot': testJava(); break
+                            case 'python-fastapi':  testPython(); break
+                            case 'go-gin':          testGo(); break
                         }
                     }
                 }
@@ -117,14 +112,12 @@ pipeline {
                     def tag = params.DOCKER_REGISTRY
                         ? "${params.DOCKER_REGISTRY}/${env.APP_NAME}:${env.BUILD_NUMBER}"
                         : "${env.APP_NAME}:${env.BUILD_NUMBER}"
-                    sh """
-                        docker build -t ${tag} -f docker/Dockerfile ${params.PROJECT_DIR}
-                    """
+                    sh "docker build -t ${tag} -f ${params.PROJECT_DIR}/docker/Dockerfile ${params.PROJECT_DIR}"
                     if (params.DOCKER_REGISTRY) {
+                        sh "docker push ${tag}"
                         sh """
-                            docker push ${tag}
-                            docker tag ${tag} \$(echo ${tag} | sed 's/:.*/:latest/')
-                            docker push \$(echo ${tag} | sed 's/:.*/:latest/')
+                            docker tag ${tag} ${params.DOCKER_REGISTRY}/${env.APP_NAME}:latest
+                            docker push ${params.DOCKER_REGISTRY}/${env.APP_NAME}:latest
                         """
                     }
                 }
@@ -139,16 +132,29 @@ pipeline {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  将容器内 workspace 路径转为宿主可访问路径
+//  /var/jenkins_home → /home/volume/local_jenkins/jenkins_home
+// ═══════════════════════════════════════════════════════════════════════════
+
+def hostPath(containerPath) {
+    return containerPath.replace('/var/jenkins_home', env.HOST_JENKINS_HOME)
+}
+
+def workdirHost() {
+    return hostPath(sh(script: 'pwd', returnStdout: true).trim())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  Java / SpringBoot
 // ═══════════════════════════════════════════════════════════════════════════
 
 def buildJava() {
     def jdkTag = params.JDK_VERSION.replace('jdk', '')
-    def workdir = sh(script: 'pwd', returnStdout: true).trim()
+    def wd = workdirHost()
     sh """
         docker run --rm \
-            -v ${workdir}:/workspace -w /workspace \
-            -v \$HOME/.m2:/root/.m2 \
+            -v ${wd}:/workspace -w /workspace \
+            -v ${env.HOST_JENKINS_HOME}/.m2:/root/.m2 \
             maven:3.9-eclipse-temurin-${jdkTag} \
             mvn clean package ${params.MAVEN_OPTS} \
                 -Dmaven.repo.local=/root/.m2/repository \
@@ -158,11 +164,11 @@ def buildJava() {
 
 def testJava() {
     def jdkTag = params.JDK_VERSION.replace('jdk', '')
-    def workdir = sh(script: 'pwd', returnStdout: true).trim()
+    def wd = workdirHost()
     sh """
         docker run --rm \
-            -v ${workdir}:/workspace -w /workspace \
-            -v \$HOME/.m2:/root/.m2 \
+            -v ${wd}:/workspace -w /workspace \
+            -v ${env.HOST_JENKINS_HOME}/.m2:/root/.m2 \
             maven:3.9-eclipse-temurin-${jdkTag} \
             mvn test -Dmaven.repo.local=/root/.m2/repository --batch-mode || true
     """
@@ -173,19 +179,19 @@ def testJava() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 def buildPython() {
-    def workdir = sh(script: 'pwd', returnStdout: true).trim()
+    def wd = workdirHost()
     if (params.PYTHON_PKG_MGR == 'uv') {
         sh """
             docker run --rm \
-                -v ${workdir}:/workspace -w /workspace \
+                -v ${wd}:/workspace -w /workspace \
                 ghcr.io/astral-sh/uv:python${params.PYTHON_VERSION}-bookworm \
                 sh -c 'uv sync --frozen 2>/dev/null || uv sync'
         """
     } else {
         sh """
             docker run --rm \
-                -v ${workdir}:/workspace -w /workspace \
-                -v \$HOME/.cache/pip:/root/.cache/pip \
+                -v ${wd}:/workspace -w /workspace \
+                -v ${env.HOST_JENKINS_HOME}/.cache/pip:/root/.cache/pip \
                 python:${params.PYTHON_VERSION}-slim \
                 sh -c 'pip install --upgrade pip && pip install -r requirements.txt'
         """
@@ -193,18 +199,18 @@ def buildPython() {
 }
 
 def testPython() {
-    def workdir = sh(script: 'pwd', returnStdout: true).trim()
+    def wd = workdirHost()
     if (params.PYTHON_PKG_MGR == 'uv') {
         sh """
             docker run --rm \
-                -v ${workdir}:/workspace -w /workspace \
+                -v ${wd}:/workspace -w /workspace \
                 ghcr.io/astral-sh/uv:python${params.PYTHON_VERSION}-bookworm \
                 sh -c 'uv run pytest --tb=short --maxfail=5 || true; uv run ruff check . || true'
         """
     } else {
         sh """
             docker run --rm \
-                -v ${workdir}:/workspace -w /workspace \
+                -v ${wd}:/workspace -w /workspace \
                 python:${params.PYTHON_VERSION}-slim \
                 sh -c 'pip install pytest && pytest --tb=short --maxfail=5 || true'
         """
@@ -216,11 +222,11 @@ def testPython() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 def buildGo() {
-    def workdir = sh(script: 'pwd', returnStdout: true).trim()
+    def wd = workdirHost()
     sh """
         docker run --rm \
-            -v ${workdir}:/workspace -w /workspace \
-            -v \$HOME/go/pkg/mod:/go/pkg/mod \
+            -v ${wd}:/workspace -w /workspace \
+            -v ${env.HOST_JENKINS_HOME}/go/pkg/mod:/go/pkg/mod \
             -e GOPATH=/go \
             golang:${params.GO_VERSION}-bookworm \
             sh -c 'go env -w GOPROXY=https://goproxy.cn,direct || true;
@@ -230,11 +236,11 @@ def buildGo() {
 }
 
 def testGo() {
-    def workdir = sh(script: 'pwd', returnStdout: true).trim()
+    def wd = workdirHost()
     sh """
         docker run --rm \
-            -v ${workdir}:/workspace -w /workspace \
-            -v \$HOME/go/pkg/mod:/go/pkg/mod \
+            -v ${wd}:/workspace -w /workspace \
+            -v ${env.HOST_JENKINS_HOME}/go/pkg/mod:/go/pkg/mod \
             -e GOPATH=/go \
             golang:${params.GO_VERSION}-bookworm \
             go test ./... -count=1 -timeout 120s --short || true
