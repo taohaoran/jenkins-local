@@ -1,16 +1,9 @@
 pipeline {
     agent { label 'built-in' }
 
-    environment {
-        // Docker daemon 通过 socat 代理访问宿主
-        DOCKER_HOST = 'tcp://alpine:2375'
-        // 容器内 JENKINS_HOME 对应的宿主路径（经 /home 挂载点）
-        HOST_JENKINS_HOME = '/home/volume/local_jenkins/jenkins_home'
-    }
-
     parameters {
         string(name: 'PROJECT_DIR', defaultValue: '.',
-               description: '项目子目录（如 demos/java-springboot），留空为仓库根目录')
+               description: '项目子目录（如 demos/java-springboot）')
         choice(name: 'JDK_VERSION', choices: ['jdk21', 'jdk17', 'jdk11'],
                description: 'JDK 版本（Java 项目）')
         choice(name: 'PYTHON_VERSION', choices: ['3.13', '3.12', '3.11', '3.10'],
@@ -90,10 +83,8 @@ pipeline {
                                 sh 'cp target/*.jar dist/ || true'
                                 break
                             case 'python-fastapi':
-                                sh """
-                                    rsync -a --exclude='__pycache__' --exclude='.venv' \
-                                        --exclude='.git' --exclude='dist' . dist/
-                                """
+                                sh 'cp -r *.py pyproject.toml dist/ 2>/dev/null || true'
+                                sh 'cp -r requirements.txt dist/ 2>/dev/null || true'
                                 break
                             case 'go-gin':
                                 sh "cp ${env.APP_NAME} dist/ || true"
@@ -115,10 +106,8 @@ pipeline {
                     sh "docker build -t ${tag} -f ${params.PROJECT_DIR}/docker/Dockerfile ${params.PROJECT_DIR}"
                     if (params.DOCKER_REGISTRY) {
                         sh "docker push ${tag}"
-                        sh """
-                            docker tag ${tag} ${params.DOCKER_REGISTRY}/${env.APP_NAME}:latest
-                            docker push ${params.DOCKER_REGISTRY}/${env.APP_NAME}:latest
-                        """
+                        sh "docker tag ${tag} ${params.DOCKER_REGISTRY}/${env.APP_NAME}:latest"
+                        sh "docker push ${params.DOCKER_REGISTRY}/${env.APP_NAME}:latest"
                     }
                 }
             }
@@ -132,117 +121,55 @@ pipeline {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  将容器内 workspace 路径转为宿主可访问路径
-//  /var/jenkins_home → /home/volume/local_jenkins/jenkins_home
-// ═══════════════════════════════════════════════════════════════════════════
-
-def hostPath(containerPath) {
-    return containerPath.replace('/var/jenkins_home', env.HOST_JENKINS_HOME)
-}
-
-def workdirHost() {
-    return hostPath(sh(script: 'pwd', returnStdout: true).trim())
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  Java / SpringBoot
+//  Java / SpringBoot  — 直接使用宿主 mvn + JDK
 // ═══════════════════════════════════════════════════════════════════════════
 
 def buildJava() {
-    def jdkTag = params.JDK_VERSION.replace('jdk', '')
-    def wd = workdirHost()
     sh """
-        docker run --rm \
-            -v ${wd}:/workspace -w /workspace \
-            -v ${env.HOST_JENKINS_HOME}/.m2:/root/.m2 \
-            maven:3.9-eclipse-temurin-${jdkTag} \
-            mvn clean package ${params.MAVEN_OPTS} \
-                -Dmaven.repo.local=/root/.m2/repository \
-                --batch-mode
+        mvn clean package \
+            ${params.MAVEN_OPTS} \
+            --batch-mode
     """
 }
 
 def testJava() {
-    def jdkTag = params.JDK_VERSION.replace('jdk', '')
-    def wd = workdirHost()
-    sh """
-        docker run --rm \
-            -v ${wd}:/workspace -w /workspace \
-            -v ${env.HOST_JENKINS_HOME}/.m2:/root/.m2 \
-            maven:3.9-eclipse-temurin-${jdkTag} \
-            mvn test -Dmaven.repo.local=/root/.m2/repository --batch-mode || true
-    """
+    sh 'mvn test --batch-mode || true'
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Python / FastAPI
+//  Python / FastAPI  — uv 或 pip
 // ═══════════════════════════════════════════════════════════════════════════
 
 def buildPython() {
-    def wd = workdirHost()
     if (params.PYTHON_PKG_MGR == 'uv') {
-        sh """
-            docker run --rm \
-                -v ${wd}:/workspace -w /workspace \
-                ghcr.io/astral-sh/uv:python${params.PYTHON_VERSION}-bookworm \
-                sh -c 'uv sync --frozen 2>/dev/null || uv sync'
-        """
+        sh 'uv sync --frozen 2>/dev/null || uv sync'
     } else {
-        sh """
-            docker run --rm \
-                -v ${wd}:/workspace -w /workspace \
-                -v ${env.HOST_JENKINS_HOME}/.cache/pip:/root/.cache/pip \
-                python:${params.PYTHON_VERSION}-slim \
-                sh -c 'pip install --upgrade pip && pip install -r requirements.txt'
-        """
+        sh 'pip install -r requirements.txt'
     }
 }
 
 def testPython() {
-    def wd = workdirHost()
     if (params.PYTHON_PKG_MGR == 'uv') {
-        sh """
-            docker run --rm \
-                -v ${wd}:/workspace -w /workspace \
-                ghcr.io/astral-sh/uv:python${params.PYTHON_VERSION}-bookworm \
-                sh -c 'uv run pytest --tb=short --maxfail=5 || true; uv run ruff check . || true'
-        """
+        sh 'uv run pytest --tb=short --maxfail=5 || true'
+        sh 'uv run ruff check . || true'
     } else {
-        sh """
-            docker run --rm \
-                -v ${wd}:/workspace -w /workspace \
-                python:${params.PYTHON_VERSION}-slim \
-                sh -c 'pip install pytest && pytest --tb=short --maxfail=5 || true'
-        """
+        sh 'pip install pytest && pytest --tb=short --maxfail=5 || true'
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Go / Gin
+//  Go / Gin  — go build + go test
 // ═══════════════════════════════════════════════════════════════════════════
 
 def buildGo() {
-    def wd = workdirHost()
+    sh 'go env -w GOPROXY=https://goproxy.cn,direct || true'
+    sh 'go mod download'
     sh """
-        docker run --rm \
-            -v ${wd}:/workspace -w /workspace \
-            -v ${env.HOST_JENKINS_HOME}/go/pkg/mod:/go/pkg/mod \
-            -e GOPATH=/go \
-            golang:${params.GO_VERSION}-bookworm \
-            sh -c 'go env -w GOPROXY=https://goproxy.cn,direct || true;
-                   go mod download;
-                   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ${params.GO_BUILD_FLAGS} -o "${env.APP_NAME}" .'
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+        go build ${params.GO_BUILD_FLAGS} -o "${env.APP_NAME}" .
     """
 }
 
 def testGo() {
-    def wd = workdirHost()
-    sh """
-        docker run --rm \
-            -v ${wd}:/workspace -w /workspace \
-            -v ${env.HOST_JENKINS_HOME}/go/pkg/mod:/go/pkg/mod \
-            -e GOPATH=/go \
-            golang:${params.GO_VERSION}-bookworm \
-            go test ./... -count=1 -timeout 120s --short || true
-    """
+    sh 'go test ./... -count=1 -timeout 120s --short || true'
 }
