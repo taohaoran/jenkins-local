@@ -117,12 +117,15 @@ pipeline {
                     def tag = params.DOCKER_REGISTRY
                         ? "${params.DOCKER_REGISTRY}/${env.APP_NAME}:${env.BUILD_NUMBER}"
                         : "${env.APP_NAME}:${env.BUILD_NUMBER}"
-                    docker.build(tag, '-f docker/Dockerfile .')
+                    sh """
+                        docker build -t ${tag} -f docker/Dockerfile ${params.PROJECT_DIR}
+                    """
                     if (params.DOCKER_REGISTRY) {
-                        docker.withRegistry("https://${params.DOCKER_REGISTRY}", 'docker-credentials') {
-                            docker.image(tag).push()
-                            docker.image(tag).push('latest')
-                        }
+                        sh """
+                            docker push ${tag}
+                            docker tag ${tag} \$(echo ${tag} | sed 's/:.*/:latest/')
+                            docker push \$(echo ${tag} | sed 's/:.*/:latest/')
+                        """
                     }
                 }
             }
@@ -141,21 +144,28 @@ pipeline {
 
 def buildJava() {
     def jdkTag = params.JDK_VERSION.replace('jdk', '')
-    docker.image("maven:3.9-eclipse-temurin-${jdkTag}").inside('-v $HOME/.m2:/root/.m2') {
-        sh """
-            mvn clean package \
-                ${params.MAVEN_OPTS} \
+    def workdir = sh(script: 'pwd', returnStdout: true).trim()
+    sh """
+        docker run --rm \
+            -v ${workdir}:/workspace -w /workspace \
+            -v \$HOME/.m2:/root/.m2 \
+            maven:3.9-eclipse-temurin-${jdkTag} \
+            mvn clean package ${params.MAVEN_OPTS} \
                 -Dmaven.repo.local=/root/.m2/repository \
                 --batch-mode
-        """
-    }
+    """
 }
 
 def testJava() {
     def jdkTag = params.JDK_VERSION.replace('jdk', '')
-    docker.image("maven:3.9-eclipse-temurin-${jdkTag}").inside('-v $HOME/.m2:/root/.m2') {
-        sh 'mvn test -Dmaven.repo.local=/root/.m2/repository --batch-mode || true'
-    }
+    def workdir = sh(script: 'pwd', returnStdout: true).trim()
+    sh """
+        docker run --rm \
+            -v ${workdir}:/workspace -w /workspace \
+            -v \$HOME/.m2:/root/.m2 \
+            maven:3.9-eclipse-temurin-${jdkTag} \
+            mvn test -Dmaven.repo.local=/root/.m2/repository --batch-mode || true
+    """
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -163,30 +173,41 @@ def testJava() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 def buildPython() {
+    def workdir = sh(script: 'pwd', returnStdout: true).trim()
     if (params.PYTHON_PKG_MGR == 'uv') {
-        docker.image("ghcr.io/astral-sh/uv:python${params.PYTHON_VERSION}-bookworm").inside {
-            sh 'uv sync --frozen 2>/dev/null || uv sync'
-        }
+        sh """
+            docker run --rm \
+                -v ${workdir}:/workspace -w /workspace \
+                ghcr.io/astral-sh/uv:python${params.PYTHON_VERSION}-bookworm \
+                sh -c 'uv sync --frozen 2>/dev/null || uv sync'
+        """
     } else {
-        docker.image("python:${params.PYTHON_VERSION}-slim").inside('-v $HOME/.cache/pip:/root/.cache/pip') {
-            sh '''
-                pip install --upgrade pip
-                pip install -r requirements.txt
-            '''
-        }
+        sh """
+            docker run --rm \
+                -v ${workdir}:/workspace -w /workspace \
+                -v \$HOME/.cache/pip:/root/.cache/pip \
+                python:${params.PYTHON_VERSION}-slim \
+                sh -c 'pip install --upgrade pip && pip install -r requirements.txt'
+        """
     }
 }
 
 def testPython() {
+    def workdir = sh(script: 'pwd', returnStdout: true).trim()
     if (params.PYTHON_PKG_MGR == 'uv') {
-        docker.image("ghcr.io/astral-sh/uv:python${params.PYTHON_VERSION}-bookworm").inside {
-            sh 'uv run pytest --tb=short --maxfail=5 || true'
-            sh 'uv run ruff check . || true'
-        }
+        sh """
+            docker run --rm \
+                -v ${workdir}:/workspace -w /workspace \
+                ghcr.io/astral-sh/uv:python${params.PYTHON_VERSION}-bookworm \
+                sh -c 'uv run pytest --tb=short --maxfail=5 || true; uv run ruff check . || true'
+        """
     } else {
-        docker.image("python:${params.PYTHON_VERSION}-slim").inside {
-            sh 'pip install pytest && pytest --tb=short --maxfail=5 || true'
-        }
+        sh """
+            docker run --rm \
+                -v ${workdir}:/workspace -w /workspace \
+                python:${params.PYTHON_VERSION}-slim \
+                sh -c 'pip install pytest && pytest --tb=short --maxfail=5 || true'
+        """
     }
 }
 
@@ -195,18 +216,27 @@ def testPython() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 def buildGo() {
-    docker.image("golang:${params.GO_VERSION}-bookworm").inside('-v $HOME/go/pkg/mod:/go/pkg/mod') {
-        sh 'go env -w GOPROXY=https://goproxy.cn,direct || true'
-        sh 'go mod download'
-        sh """
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-            go build ${params.GO_BUILD_FLAGS} -o "${env.APP_NAME}" .
-        """
-    }
+    def workdir = sh(script: 'pwd', returnStdout: true).trim()
+    sh """
+        docker run --rm \
+            -v ${workdir}:/workspace -w /workspace \
+            -v \$HOME/go/pkg/mod:/go/pkg/mod \
+            -e GOPATH=/go \
+            golang:${params.GO_VERSION}-bookworm \
+            sh -c 'go env -w GOPROXY=https://goproxy.cn,direct || true;
+                   go mod download;
+                   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ${params.GO_BUILD_FLAGS} -o "${env.APP_NAME}" .'
+    """
 }
 
 def testGo() {
-    docker.image("golang:${params.GO_VERSION}-bookworm").inside('-v $HOME/go/pkg/mod:/go/pkg/mod') {
-        sh 'go test ./... -count=1 -timeout 120s --short || true'
-    }
+    def workdir = sh(script: 'pwd', returnStdout: true).trim()
+    sh """
+        docker run --rm \
+            -v ${workdir}:/workspace -w /workspace \
+            -v \$HOME/go/pkg/mod:/go/pkg/mod \
+            -e GOPATH=/go \
+            golang:${params.GO_VERSION}-bookworm \
+            go test ./... -count=1 -timeout 120s --short || true
+    """
 }
