@@ -149,7 +149,7 @@ pipeline {
 
 def buildJava() {
     sh """
-        source "\$HOME/.sdkman/bin/sdkman-init.sh"
+        . "\$HOME/.sdkman/bin/sdkman-init.sh"
         sdk use java ${params.JDK_VERSION}-tem
         sdk use maven 3.9.9
         mvn clean package ${params.MAVEN_OPTS} --batch-mode
@@ -158,7 +158,7 @@ def buildJava() {
 
 def testJava() {
     sh """
-        source "\$HOME/.sdkman/bin/sdkman-init.sh"
+        . "\$HOME/.sdkman/bin/sdkman-init.sh"
         sdk use java ${params.JDK_VERSION}-tem
         sdk use maven 3.9.9
         mvn test --batch-mode || true
