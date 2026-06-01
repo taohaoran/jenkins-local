@@ -2,6 +2,8 @@ pipeline {
     agent any
 
     parameters {
+        string(name: 'PROJECT_DIR', defaultValue: '.',
+               description: '项目子目录（如 demos/java-springboot），留空为仓库根目录')
         choice(name: 'JDK_VERSION', choices: ['jdk21', 'jdk17', 'jdk11'],
                description: 'JDK 版本（Java 项目）')
         choice(name: 'PYTHON_VERSION', choices: ['3.13', '3.12', '3.11', '3.10'],
@@ -24,16 +26,19 @@ pipeline {
         stage('Detect Project Type') {
             steps {
                 script {
-                    if (fileExists('pom.xml')) {
-                        env.PROJECT_TYPE = 'java-springboot'
-                    } else if (fileExists('pyproject.toml') || fileExists('requirements.txt')) {
-                        env.PROJECT_TYPE = 'python-fastapi'
-                    } else if (fileExists('go.mod')) {
-                        env.PROJECT_TYPE = 'go-gin'
-                    } else {
-                        error('无法识别项目类型：未找到 pom.xml / pyproject.toml / requirements.txt / go.mod')
+                    dir(params.PROJECT_DIR) {
+                        if (fileExists('pom.xml')) {
+                            env.PROJECT_TYPE = 'java-springboot'
+                        } else if (fileExists('pyproject.toml') || fileExists('requirements.txt')) {
+                            env.PROJECT_TYPE = 'python-fastapi'
+                        } else if (fileExists('go.mod')) {
+                            env.PROJECT_TYPE = 'go-gin'
+                        } else {
+                            error("无法识别项目类型：${params.PROJECT_DIR} 下未找到 pom.xml / pyproject.toml / go.mod")
+                        }
+                        env.APP_NAME = sh(script: 'basename "$(pwd)"', returnStdout: true).trim()
                     }
-                    env.APP_NAME = sh(script: 'basename "$(pwd)"', returnStdout: true).trim()
+                    echo "项目目录: ${params.PROJECT_DIR}"
                     echo "检测到项目类型: ${env.PROJECT_TYPE}"
                     echo "应用名称: ${env.APP_NAME}"
                 }
@@ -43,16 +48,18 @@ pipeline {
         stage('Build') {
             steps {
                 script {
-                    switch (env.PROJECT_TYPE) {
-                        case 'java-springboot':
-                            buildJava()
-                            break
-                        case 'python-fastapi':
-                            buildPython()
-                            break
-                        case 'go-gin':
-                            buildGo()
-                            break
+                    dir(params.PROJECT_DIR) {
+                        switch (env.PROJECT_TYPE) {
+                            case 'java-springboot':
+                                buildJava()
+                                break
+                            case 'python-fastapi':
+                                buildPython()
+                                break
+                            case 'go-gin':
+                                buildGo()
+                                break
+                        }
                     }
                 }
             }
@@ -61,16 +68,18 @@ pipeline {
         stage('Test') {
             steps {
                 script {
-                    switch (env.PROJECT_TYPE) {
-                        case 'java-springboot':
-                            testJava()
-                            break
-                        case 'python-fastapi':
-                            testPython()
-                            break
-                        case 'go-gin':
-                            testGo()
-                            break
+                    dir(params.PROJECT_DIR) {
+                        switch (env.PROJECT_TYPE) {
+                            case 'java-springboot':
+                                testJava()
+                                break
+                            case 'python-fastapi':
+                                testPython()
+                                break
+                            case 'go-gin':
+                                testGo()
+                                break
+                        }
                     }
                 }
             }
@@ -79,22 +88,24 @@ pipeline {
         stage('Collect Artifacts') {
             steps {
                 script {
-                    sh 'mkdir -p dist'
-                    switch (env.PROJECT_TYPE) {
-                        case 'java-springboot':
-                            sh 'cp target/*.jar dist/ || true'
-                            break
-                        case 'python-fastapi':
-                            sh """
-                                rsync -a --exclude='__pycache__' --exclude='.venv' \
-                                    --exclude='.git' --exclude='dist' . dist/
-                            """
-                            break
-                        case 'go-gin':
-                            sh "cp ${env.APP_NAME} dist/ || true"
-                            break
+                    dir(params.PROJECT_DIR) {
+                        sh 'mkdir -p dist'
+                        switch (env.PROJECT_TYPE) {
+                            case 'java-springboot':
+                                sh 'cp target/*.jar dist/ || true'
+                                break
+                            case 'python-fastapi':
+                                sh """
+                                    rsync -a --exclude='__pycache__' --exclude='.venv' \
+                                        --exclude='.git' --exclude='dist' . dist/
+                                """
+                                break
+                            case 'go-gin':
+                                sh "cp ${env.APP_NAME} dist/ || true"
+                                break
+                        }
+                        archiveArtifacts artifacts: 'dist/**', fingerprint: true
                     }
-                    archiveArtifacts artifacts: 'dist/**', fingerprint: true
                 }
             }
         }
