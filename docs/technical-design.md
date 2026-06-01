@@ -220,3 +220,74 @@ services:
 4. 版本切换可通过 `sdkman` / `pyenv` / `gvm` 等工具实现，比换 Docker 镜像更轻量
 
 如果未来迁移到 Kubernetes 或需要严格构建环境隔离，再考虑 DinD 路线。
+
+---
+
+## Cloud Agent 多版本方案（推荐演进方向）
+
+### 架构
+
+```
+Jenkins Controller (built-in, 只做调度 + 轻量步骤)
+  │
+  ├── Agent "java-build"   ── sdkman → JDK 21/17/11 + Maven
+  ├── Agent "python-build" ── uv     → Python 3.10~3.13 + pytest/ruff
+  └── Agent "go-build"     ── symlink → Go 1.21~1.24
+```
+
+每个 Agent 是一个 Docker 容器（Docker plugin 动态创建），镜像预装版本管理器：
+
+| Agent 镜像 | 版本管理 | 切换方式 |
+|------------|----------|----------|
+| `agent-java` | sdkman | `source sdkman-init.sh && sdk use java 21-tem` |
+| `agent-python` | uv | `uv venv --python 3.12` |
+| `agent-go` | ln -sf | `ln -sf /usr/local/go1.23.4 /usr/local/go` |
+
+### Agent Dockerfile
+
+**Java** (`docker/agent-java.Dockerfile`)：基于 `jenkins/inbound-agent`，通过 sdkman 安装 JDK 21/17/11 和 Maven。
+
+**Python** (`docker/agent-python.Dockerfile`)：基于 `jenkins/inbound-agent`，通过 uv 管理 Python 3.10~3.13 + pytest + ruff。
+
+**Go** (`docker/agent-go.Dockerfile`)：基于 `jenkins/inbound-agent`，多版本并存于 `/usr/local/go${ver}`，通过 symlink 激活。
+
+### Jenkinsfile 调度逻辑
+
+```groovy
+pipeline {
+    agent none                    // Controller 不参与构建
+
+    stages {
+        stage('Detect') {
+            agent { label 'built-in' }  // 轻量检测用 Controller
+        }
+        stage('Build') {
+            steps {
+                script {
+                    switch (env.PROJECT_TYPE) {
+                        case 'java-springboot': node('java-build') { buildJava() }
+                        case 'python-fastapi':  node('python-build') { buildPython() }
+                        case 'go-gin':          node('go-build') { buildGo() }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+### 缓存策略
+
+| 缓存 | 方案 |
+|------|------|
+| `.m2` Maven 仓库 | 挂载 host volume 或使用 Nexus/Artifactory proxy |
+| `GOPATH/pkg/mod` | 挂载 host volume |
+| `uv/pip cache` | `$HOME/.cache/uv` 挂载 volume |
+
+### 构建流程
+
+1. Controller checkout 代码
+2. Detect stage（built-in 节点）扫描标记文件，判定语言类型
+3. Build stage — Jenkins Docker plugin 按 label 创建对应 Agent 容器
+4. Agent 内执行版本切换 + 构建命令
+5. Agent 使用完毕自动销毁（`DockerOnceRetentionStrategy`）

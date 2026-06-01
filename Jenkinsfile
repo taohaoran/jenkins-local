@@ -1,14 +1,14 @@
 pipeline {
-    agent { label 'built-in' }
+    agent none
 
     parameters {
         string(name: 'PROJECT_DIR', defaultValue: '.',
                description: '项目子目录（如 demos/java-springboot）')
-        choice(name: 'JDK_VERSION', choices: ['jdk21', 'jdk17', 'jdk11'],
+        choice(name: 'JDK_VERSION', choices: ['21', '17', '11'],
                description: 'JDK 版本（Java 项目）')
         choice(name: 'PYTHON_VERSION', choices: ['3.13', '3.12', '3.11', '3.10'],
                description: 'Python 版本（Python 项目）')
-        choice(name: 'GO_VERSION', choices: ['1.24', '1.23', '1.22', '1.21'],
+        choice(name: 'GO_VERSION', choices: ['1.24.0', '1.23.4', '1.22.10', '1.21.13'],
                description: 'Go 版本（Go 项目）')
         choice(name: 'PYTHON_PKG_MGR', choices: ['uv', 'pip'],
                description: 'Python 依赖管理工具')
@@ -24,6 +24,7 @@ pipeline {
 
     stages {
         stage('Detect Project Type') {
+            agent { label 'built-in' }
             steps {
                 script {
                     dir(params.PROJECT_DIR) {
@@ -48,12 +49,22 @@ pipeline {
         stage('Build') {
             steps {
                 script {
-                    dir(params.PROJECT_DIR) {
-                        switch (env.PROJECT_TYPE) {
-                            case 'java-springboot': buildJava(); break
-                            case 'python-fastapi':  buildPython(); break
-                            case 'go-gin':          buildGo(); break
-                        }
+                    switch (env.PROJECT_TYPE) {
+                        case 'java-springboot':
+                            node('java-build') {
+                                dir(params.PROJECT_DIR) { buildJava() }
+                            }
+                            break
+                        case 'python-fastapi':
+                            node('python-build') {
+                                dir(params.PROJECT_DIR) { buildPython() }
+                            }
+                            break
+                        case 'go-gin':
+                            node('go-build') {
+                                dir(params.PROJECT_DIR) { buildGo() }
+                            }
+                            break
                     }
                 }
             }
@@ -62,18 +73,29 @@ pipeline {
         stage('Test') {
             steps {
                 script {
-                    dir(params.PROJECT_DIR) {
-                        switch (env.PROJECT_TYPE) {
-                            case 'java-springboot': testJava(); break
-                            case 'python-fastapi':  testPython(); break
-                            case 'go-gin':          testGo(); break
-                        }
+                    switch (env.PROJECT_TYPE) {
+                        case 'java-springboot':
+                            node('java-build') {
+                                dir(params.PROJECT_DIR) { testJava() }
+                            }
+                            break
+                        case 'python-fastapi':
+                            node('python-build') {
+                                dir(params.PROJECT_DIR) { testPython() }
+                            }
+                            break
+                        case 'go-gin':
+                            node('go-build') {
+                                dir(params.PROJECT_DIR) { testGo() }
+                            }
+                            break
                     }
                 }
             }
         }
 
         stage('Collect Artifacts') {
+            agent { label 'built-in' }
             steps {
                 script {
                     dir(params.PROJECT_DIR) {
@@ -97,6 +119,7 @@ pipeline {
         }
 
         stage('Docker Build & Push') {
+            agent { label 'built-in' }
             when { expression { params.BUILD_DOCKER_IMAGE } }
             steps {
                 script {
@@ -121,60 +144,74 @@ pipeline {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Java / SpringBoot  — 直接使用宿主 mvn + JDK
+//  Java — sdkman 切换 JDK 版本 + Maven
 // ═══════════════════════════════════════════════════════════════════════════
 
 def buildJava() {
     sh """
-        mvn clean package \
-            ${params.MAVEN_OPTS} \
-            --batch-mode
+        source "\$HOME/.sdkman/bin/sdkman-init.sh"
+        sdk use java ${params.JDK_VERSION}-tem
+        sdk use maven 3.9.9
+        mvn clean package ${params.MAVEN_OPTS} --batch-mode
     """
 }
 
 def testJava() {
-    sh 'mvn test --batch-mode || true'
+    sh """
+        source "\$HOME/.sdkman/bin/sdkman-init.sh"
+        sdk use java ${params.JDK_VERSION}-tem
+        sdk use maven 3.9.9
+        mvn test --batch-mode || true
+    """
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Python / FastAPI  — uv 或 pip
+//  Python — uv 管理 Python 版本 + 依赖
 // ═══════════════════════════════════════════════════════════════════════════
 
 def buildPython() {
     if (params.PYTHON_PKG_MGR == 'uv') {
-        sh 'uv sync --frozen 2>/dev/null || uv sync'
+        sh """
+            export PATH="\$HOME/.local/bin:\$PATH"
+            uv venv --python ${params.PYTHON_VERSION} .venv
+            uv sync --frozen 2>/dev/null || uv sync
+        """
     } else {
-        sh 'pip install -r requirements.txt'
+        sh "pip${params.PYTHON_VERSION} install -r requirements.txt || pip3 install -r requirements.txt"
     }
 }
 
 def testPython() {
     if (params.PYTHON_PKG_MGR == 'uv') {
-        sh 'uv run pytest --tb=short --maxfail=5 || true'
-        sh 'uv run ruff check . || true'
+        sh """
+            export PATH="\$HOME/.local/bin:\$PATH"
+            uv run pytest --tb=short --maxfail=5 || true
+            uv run ruff check . || true
+        """
     } else {
-        sh 'pip install pytest && pytest --tb=short --maxfail=5 || true'
+        sh "pip${params.PYTHON_VERSION} install pytest && python${params.PYTHON_VERSION} -m pytest --tb=short --maxfail=5 || true"
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Go / Gin  — go build + go test
+//  Go — symlink 切换版本
 // ═══════════════════════════════════════════════════════════════════════════
 
 def buildGo() {
-    withEnv(["PATH+GO=/usr/local/go/bin"]) {
-        sh 'go env -w GOPROXY=https://goproxy.cn,direct || true'
-        sh 'go mod tidy'
-        sh 'go mod download'
-        sh """
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-            go build ${params.GO_BUILD_FLAGS} -o "${env.APP_NAME}" .
-        """
-    }
+    sh """
+        ln -sf /usr/local/go${params.GO_VERSION} /usr/local/go
+        export PATH=/usr/local/go/bin:\$PATH
+        go env -w GOPROXY=https://goproxy.cn,direct || true
+        go mod tidy
+        go mod download
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+        go build ${params.GO_BUILD_FLAGS} -o "${env.APP_NAME}" .
+    """
 }
 
 def testGo() {
-    withEnv(["PATH+GO=/usr/local/go/bin"]) {
-        sh 'go test ./... -count=1 -timeout 120s --short || true'
-    }
+    sh """
+        export PATH=/usr/local/go/bin:\$PATH
+        go test ./... -count=1 -timeout 120s --short || true
+    """
 }
